@@ -1,19 +1,22 @@
+import os
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
-    MessageHandler,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
-import requests
 from groq import Groq
 
 # =========================
-# TOKENS
+# ENV VARIABLES
 # =========================
-BOT_TOKEN = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
-GROQ_API_KEY = "PUT_YOUR_GROQ_API_KEY_HERE"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not BOT_TOKEN or not GROQ_API_KEY:
+    raise ValueError("Missing BOT_TOKEN or GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -25,141 +28,83 @@ MODELS = [
     "llama-3-8b-instruct",
 ]
 
-def groq_chat_with_fallback(prompt):
+# =========================
+# GROQ CHAT FUNCTION
+# =========================
+def groq_chat_with_fallback(prompt: str) -> str:
     for model in MODELS:
         try:
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a clinical pharmacist."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a clinical pharmacist. "
+                            "Provide concise, accurate, educational information only. "
+                            "Format the answer exactly as:\n"
+                            "Drug name:\n"
+                            "MOA:\n"
+                            "Side effects:\n"
+                            "DDI:\n"
+                            "Use bullet points where appropriate."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
-                max_tokens=500
+                temperature=0.3,
             )
             return completion.choices[0].message.content
         except Exception as e:
-            print(f"Model failed: {model} | {e}")
+            last_error = e
             continue
-    return None
-
-
-# =========================
-# SEARCH DRUG (DailyMed)
-# =========================
-def search_drug(drug_name):
-    try:
-        url = "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json"
-        params = {
-            "drug_name": drug_name,
-            "pagesize": 5
-        }
-        response = requests.get(url, params=params, timeout=10)
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-        if not data.get("data"):
-            return None
-
-        return data["data"][0]
-
-    except Exception:
-        return None
-
+    return f"❌ Error contacting AI model:\n{last_error}"
 
 # =========================
-# /start
+# HANDLERS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 أهلاً\n"
         "💊 Super Pharmacist Bot\n\n"
-        "✍️ اكتب الاسم العلمي للدواء (بالإنجليزي)\n\n"
-        "أمثلة:\n"
+        "اكتب الاسم العلمي للدواء (بالإنجليزي)\n"
+        "مثال:\n"
         "metformin\n"
         "omeprazole\n\n"
         "⚠️ المعلومات إرشادية فقط."
     )
 
-
-# =========================
-# MAIN REPLY
-# =========================
 async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    drug_input = update.message.text.strip()
+    drug_name = update.message.text.strip()
 
-    await update.message.reply_text("🔎 جارٍ البحث عن الدواء...")
-
-    drug_data = search_drug(drug_input)
-    if not drug_data:
-        await update.message.reply_text(
-            "❌ لم يتم العثور على الدواء.\n"
-            "تأكد من كتابة الاسم العلمي بالإنجليزية."
-        )
-        return
-
-    raw_title = drug_data.get("title", drug_input)
-
-    drug_name = (
-        raw_title
-        .split(" AND ")[0]
-        .split("TABLET")[0]
-        .split("CAPSULE")[0]
-        .split("INJECTION")[0]
-        .split("FOR ")[0]
-        .strip()
-        .title()
-    )
+    await update.message.reply_text("🔍 جارٍ البحث عن الدواء...")
 
     prompt = f"""
-You are a clinical pharmacist.
+Provide the following for the drug: {drug_name}
 
-Provide concise educational information about the following drug:
+Required format:
 
-Drug name: {drug_name}
-
-Use EXACTLY this structure:
-
+Drug name:
 MOA:
-(2 lines max)
-
 Side effects:
-• bullet points
-
 DDI:
-• bullet points
-
-Rules:
-- No dosing
-- No treatment decisions
-- Educational only
 """
 
-    ai_answer = groq_chat_with_fallback(prompt)
+    answer = groq_chat_with_fallback(prompt)
 
-    if not ai_answer:
-        await update.message.reply_text(
-            "❌ الذكاء الاصطناعي غير متاح حاليًا.\n"
-            "حاول مرة أخرى لاحقًا."
-        )
-        return
-
-    await update.message.reply_text(
-        f"💊 Drug name:\n{drug_name}\n\n"
-        f"{ai_answer}\n\n"
-        "⚠️ Educational information only."
-    )
-
+    await update.message.reply_text(answer)
 
 # =========================
 # RUN BOT
 # =========================
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply))
 
-print("Bot is running...")
-app.run_polling()
+    print("Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
